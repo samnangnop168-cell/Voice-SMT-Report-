@@ -1,0 +1,132 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Factory Voice Reporter</title>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/lamejs/1.2.1/lame.all.min.js"></script>
+    <style>
+        :root { --primary: #007aff; --bg: #f2f2f7; --card: #ffffff; }
+        body { font-family: -apple-system, sans-serif; background: var(--bg); display: flex; flex-direction: column; align-items: center; padding: 20px; margin: 0; }
+        .card { background: var(--card); padding: 30px; border-radius: 24px; box-shadow: 0 10px 25px rgba(0,0,0,0.05); width: 100%; max-width: 400px; text-align: center; }
+        input { width: 90%; padding: 14px; margin: 15px 0; border: 1.5px solid #e5e5ea; border-radius: 12px; font-size: 16px; outline: none; text-align: center; }
+        .controls { display: flex; justify-content: center; gap: 20px; margin-top: 10px; }
+        .btn { width: 75px; height: 75px; border-radius: 50%; border: none; cursor: pointer; transition: 0.3s; font-weight: bold; }
+        #startBtn { background: var(--primary); color: white; }
+        #stopBtn { background: #8e8e93; color: white; }
+        .recording { background: #ff3b30 !important; animation: pulse 1s infinite; }
+        .history { width: 100%; max-width: 400px; margin-top: 30px; }
+        .item { background: var(--card); padding: 16px; margin-bottom: 12px; border-radius: 16px; display: flex; justify-content: space-between; align-items: center; border-left: 6px solid var(--primary); box-shadow: 0 4px 10px rgba(0,0,0,0.02); }
+        .user-tag { font-weight: bold; color: #1c1c1e; }
+        .time-tag { font-size: 12px; color: #8e8e93; }
+        @keyframes pulse { 0% { transform: scale(1); } 50% { transform: scale(1.08); } 100% { transform: scale(1); } }
+    </style>
+</head>
+<body>
+
+    <div class="card">
+        <h2 style="margin:0 0 10px 0;">Voice Reporter</h2>
+        <input type="text" id="userName" placeholder="Enter Your Name..." />
+        <div id="status" style="font-weight:600; color:#8e8e93; margin-bottom:15px;">READY</div>
+        <div class="controls">
+            <button id="startBtn" class="btn">REC</button>
+            <button id="stopBtn" class="btn" disabled>STOP</button>
+        </div>
+    </div>
+
+    <div class="history">
+        <h3 style="margin-bottom:15px; color:#1c1c1e;">Instant History</h3>
+        <div id="list"><em>No reports recorded.</em></div>
+    </div>
+
+    <script>
+        const scriptURL = "PASTE_YOUR_NEW_WEB_APP_URL_HERE"; 
+        
+        // Auto-load Name & History
+        document.getElementById('userName').value = localStorage.getItem('user_name') || "";
+        renderHistory();
+
+        let audioCtx, encoder, chunks = [];
+
+        function renderHistory() {
+            const history = JSON.parse(localStorage.getItem('local_voice_history') || "[]");
+            const listDiv = document.getElementById('list');
+            if (history.length === 0) return;
+            
+            listDiv.innerHTML = "";
+            history.forEach(item => {
+                const div = document.createElement('div');
+                div.className = 'item';
+                div.innerHTML = `<div><div class="user-tag">${item.name}</div><div class="time-tag">${item.time}</div></div>
+                                 <div style="font-size:11px; font-weight:bold; color:var(--primary);">SAVED</div>`;
+                listDiv.appendChild(div);
+            });
+        }
+
+        document.getElementById('startBtn').onclick = async () => {
+            const user = document.getElementById('userName').value;
+            if(!user) return alert("Please enter your name!");
+            localStorage.setItem('user_name', user);
+
+            const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+            audioCtx = new AudioContext();
+            encoder = new lamejs.Mp3Encoder(1, audioCtx.sampleRate, 128);
+            chunks = [];
+            const source = audioCtx.createMediaStreamSource(stream);
+            const proc = audioCtx.createScriptProcessor(4096, 1, 1);
+            proc.onaudioprocess = e => {
+                const pcm = e.inputBuffer.getChannelData(0);
+                const int16 = new Int16Array(pcm.length);
+                for (let i = 0; i < pcm.length; i++) int16[i] = pcm[i] < 0 ? pcm[i] * 32768 : pcm[i] * 32767;
+                const buf = encoder.encodeBuffer(int16);
+                if (buf.length > 0) chunks.push(new Uint8Array(buf));
+            };
+            source.connect(proc); proc.connect(audioCtx.destination);
+            
+            document.getElementById('startBtn').classList.add('recording');
+            document.getElementById('startBtn').disabled = true;
+            document.getElementById('stopBtn').disabled = false;
+            document.getElementById('status').innerText = "RECORDING...";
+        };
+
+        document.getElementById('stopBtn').onclick = async () => {
+            const user = document.getElementById('userName').value;
+            const now = new Date();
+            const timeStr = now.toLocaleTimeString([], {hour: '2-digit', minute:'2-digit'}) + " | " + now.toLocaleDateString();
+            
+            // 1. INSTANT LOCAL UPDATE
+            let localHistory = JSON.parse(localStorage.getItem('local_voice_history') || "[]");
+            localHistory.unshift({ name: user, time: timeStr });
+            localStorage.setItem('local_voice_history', JSON.stringify(localHistory.slice(0, 10)));
+            renderHistory();
+
+            // 2. PREPARE CLOUD SYNC
+            document.getElementById('status').innerText = "SYNCING TO FOLDER...";
+            const final = encoder.flush();
+            if (final.length > 0) chunks.push(new Uint8Array(final));
+            const blob = new Blob(chunks, { type: 'audio/mp3' });
+            
+            // Format: Name_Time.mp3 (Daily folder created in Google Script)
+            const fileName = `${user}_${now.getHours()}-${now.getMinutes()}.mp3`;
+
+            const reader = new FileReader();
+            reader.readAsDataURL(blob);
+            reader.onloadend = async () => {
+                const base64 = reader.result.split(',')[1];
+                fetch(scriptURL, { 
+                    method: 'POST', 
+                    body: JSON.stringify({ base64: base64, name: fileName, userName: user }) 
+                }).then(() => {
+                    document.getElementById('status').innerText = "DONE!";
+                    setTimeout(() => document.getElementById('status').innerText = "READY", 2000);
+                });
+            };
+
+            audioCtx.close();
+            document.getElementById('startBtn').classList.remove('recording');
+            document.getElementById('startBtn').disabled = false;
+            document.getElementById('stopBtn').disabled = true;
+        };
+    </script>
+</body>
+</html>
